@@ -1,51 +1,181 @@
-This is a base node js project template , which anyone can use as it has been prepared , by keeping some of the most important code principles and project management recommendation. Feel free to change anything. 
+# Notification & Ticketing Service (`Noti-Service`)
 
+The **Notification & Ticketing Service** is an asynchronous message consumer and email delivery worker. It ingests flight booking confirmation and recovery events from **RabbitMQ**, creates auditable notification ticket records in MySQL, and delivers customer-facing emails via **Nodemailer** using Gmail SMTP.
 
-`src` -> Inside the src folder all the actual source code regarding the project will reside , this will not include  any kind of tests .(You moght want to make seperate tests folder)
+---
 
-Lets take a look inside the  `src` folder
+## 1. Tech Stack & Dependencies
 
--`config`-> In this folder anything and everything regarding any configuration or setup of a library or module will be done. For example: setting up `dotenv` so that we can use the environment variables anywhere in a cleaner fashion, this is done in the `server-config.js` . One more example can be to setup your logging library that can help you to prepare meaningful logs, so configuration for this library should also be done here . 
+- **Runtime & Framework:** Node.js (v18+), Express.js (`^5.2.1`)
+- **Message Consumer:** RabbitMQ via `amqplib` (`^2.0.1`)
+- **Email Delivery:** Nodemailer (`^10.0.10`) with Gmail SMTP Transporter
+- **ORM & Database:** Sequelize (`^6.37.8`), `sequelize-cli` (`^6.6.5`), MySQL (`mysql2` `^3.22.5`)
+- **Logging & Utilities:** Winston (`^3.19.0`), `http-status-codes` (`^2.3.0`), `dotenv` (`^17.4.2`)
 
--`routes`-> In the routes folder , we register a route and the corresponding middleware and controllers to it . 
+---
 
--`middlewares`-> They are just going to interpret the incoming requests where we can write our validators, authenticators etc. 
+## 2. Architecture & Asynchronous Event Ingestion
 
--`controllers`-> They are kind of the last middlewares as post them you call your buisness layer to execute the buisness logic . In controllers we just receive the incoming requests and data and then pass it to the buisness layer , and once buisness layer returns an output , we structure the API response in controllers and send the output . 
+The Notification Service operates both as an HTTP REST service and as an asynchronous worker listening to RabbitMQ:
 
--`repositories`-> This folder contains all the logic using which we interact thew DB by writing queries , all the raw queries or ORM queries will go here. 
-
--`services`-> contains the buisness logic and interacts with repositories for data from the database . 
-
--`utils`-> contains helper methods , error classes etc. 
-
-### Setup the project
-
--Dowmload this template from github and open it in your favourite text editor .
-- Go inside the folder path and execute the following command:
+```mermaid
+flowchart LR
+    Booking[Flight Booking Service] -->|Publishes JSON Payload| Rabbit[(RabbitMQ: noti-queue)]
+    Rabbit -->|Consumes Event| Worker[AMQP Channel Consumer]
+    Worker --> EmailSvc[Email Service]
+    EmailSvc --> SMTP[Nodemailer / Gmail SMTP]
+    SMTP --> ClientEmail([Passenger Inbox])
+    EmailSvc -.-> Ack[channel.ack: Acknowledge Message]
+    
+    REST[Direct HTTP Client] -->|POST /api/v1/tickets| TicketController[Ticket Controller]
+    TicketController --> TicketRepo[Ticket Repository]
+    TicketRepo --> MySQL[(MySQL Noti DB)]
 ```
+
+---
+
+## 3. RabbitMQ Message Consumption & Processing Flow
+
+### 1. Consumer Lifecycle
+1. When the server boots on port `3002`, `connectQueue()` initializes a connection to `amqp://localhost`.
+2. Creates an AMQP channel and asserts the durable queue `noti-queue`.
+3. Sets up `channel.consume("noti-queue", async (data) => { ... })`.
+
+### 2. Consumed Event Payload Schema
+```json
+{
+  "subject": "Booking Confirmation",
+  "text": "Booking successfully done for the flight 14",
+  "recepientEmail": "passenger@example.com"
+}
+```
+
+### 3. Email Delivery & Acknowledgement
+```javascript
+channel.consume("noti-queue", async (data) => {
+  try {
+    const payload = JSON.parse(`${Buffer.from(data.content)}`);
+    await emailService.sendEmail({
+      mailFrom: serverConfig.GMAIL_EMAIL,
+      mailTo: payload.recepientEmail,
+      subject: payload.subject,
+      text: payload.text
+    });
+    // Explicit manual acknowledgment ensures zero message loss
+    channel.ack(data);
+  } catch (error) {
+    console.error("Failed to process notification message:", error);
+  }
+});
+```
+
+---
+
+## 4. Database Schema
+
+The service maintains notification history and auditing records using the `Tickets` table:
+
+```mermaid
+erDiagram
+    TICKETS {
+        int id PK
+        string subject
+        string content
+        string recepientEmail
+        enum status "PENDING, SUCCESS, FAILED"
+        datetime createdAt
+        datetime updatedAt
+    }
+```
+
+- **`subject`** (STRING, Required): Email subject line.
+- **`content`** (STRING, Required): Email body text / HTML.
+- **`recepientEmail`** (STRING, Required): Destination email address.
+- **`status`** (ENUM, Default: `'PENDING'`): Delivery state (`PENDING`, `SUCCESS`, `FAILED`).
+
+---
+
+## 5. Environment Variables & Setup
+
+Create a `.env` file in `Noti-Service/`:
+
+```env
+PORT=3002
+GMAIL_EMAIL=your_airline_notification_email@gmail.com
+GMAIL_PASS=your_gmail_16_digit_app_password
+```
+
+> [!IMPORTANT]
+> `GMAIL_PASS` requires a **Google App Password** generated from your Google Account Security settings (with 2-Factor Authentication enabled). Standard Gmail account passwords will be rejected by Google's SMTP servers.
+
+### Database Configuration (`src/config/config.json`)
+```json
+{
+  "development": {
+    "username": "root",
+    "password": "your_db_password",
+    "database": "Flight_Notification_Dev",
+    "host": "127.0.0.1",
+    "dialect": "mysql"
+  }
+}
+```
+
+---
+
+## 6. API Route Catalog & Endpoints
+
+### 1. Create Notification Ticket
+- **Method & Route:** `POST /api/v1/tickets`
+- **Access:** Direct HTTP / Service-to-Service
+- **Description:** Directly queues a notification ticket in the MySQL database in `PENDING` state.
+- **Request Body:**
+  ```json
+  {
+    "subject": "Flight Delay Alert",
+    "content": "Your flight AI-202 has been delayed by 45 minutes.",
+    "recepientEmail": "passenger@example.com"
+  }
+  ```
+- **Success Response (`201 Created`):**
+  ```json
+  {
+    "id": 1,
+    "subject": "Flight Delay Alert",
+    "content": "Your flight AI-202 has been delayed by 45 minutes.",
+    "recepientEmail": "passenger@example.com",
+    "status": "PENDING",
+    "createdAt": "2026-09-26T01:25:00.000Z",
+    "updatedAt": "2026-09-26T01:25:00.000Z"
+  }
+  ```
+
+---
+
+## 7. Setup & Execution
+
+### Prerequisites
+1. **RabbitMQ Broker:** Running on default port `5672` (`amqp://localhost`).
+2. **MySQL Server:** Initialized and running.
+
+### 1. Install Dependencies
+```bash
+cd Noti-Service
 npm install
 ```
 
--In the root directory create a `.env` file and add the following env variables 
+### 2. Run Database Migrations
+```bash
+npx sequelize db:migrate
+```
 
-```
-PORT = <port number of your choice>
-```
-ex:
-```PORT=3000
-```
--go inside the `src` folder and execute the following command:
-
-```
-npx sequelize init
-```
--By executing the above command you will get migrations and seeders folders along with a config.json inside the config folder.
-
--If you are setting up your development environment, then write the username of your db , password of your db and in dialect mention whatever db you are using for ex:mysql , mariadb etc
--If you're setting up test or prod environment, make sure you also replace host with the hosted db url.
-
--To run the server execute
-```
+### 3. Start Development Server
+```bash
 npm run dev
 ```
+Upon startup, the console prints:
+```text
+Server is running on port 3002
+connected to queue
+```
+The service is now listening for incoming HTTP requests and polling `noti-queue` for outbound emails.
