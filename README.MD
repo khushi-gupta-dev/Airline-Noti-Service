@@ -1,9 +1,14 @@
-﻿# Notification Service
+# Notification Service
 
-Consumes JSON confirmation messages from RabbitMQ queue `noti-queue` and emails the supplied `recepientEmail` using Nodemailer. The current queue consumer does not store notification tickets or maintain delivery statuses; failed messages are logged and no retry/dead-letter policy is configured.
+Notification Service (default port `3002`) consumes booking confirmation messages from RabbitMQ queue `noti-queue` and sends email using Nodemailer. Its HTTP API separately creates notification ticket records.
 
-The HTTP API exposes the ticket routes under `/api/v1`; it is separate from the booking confirmation consumer.
+## Routes and queue behavior
+
+- `POST /api/v1/tickets`: create a ticket record; this endpoint does not send the queued booking confirmation email.
+- Queue message fields: `recepientEmail`, `subject`, and `text`. Booking Service sets the recipient to the first passenger's email address.
+
+The queue consumer acknowledges a message after email sending succeeds. Its callback has no explicit per-message error handler, retry policy, dead-letter queue, or persisted delivery status. Broker redelivery behavior is not guaranteed by this application code.
 
 ## Run
 
-Configure `PORT`, `GMAIL_EMAIL`, `GMAIL_PASS`, the MySQL database, and RabbitMQ at `amqp://localhost`. Apply migrations, then run `npm run dev` (default port 3002).
+Configure `PORT`, `GMAIL_EMAIL`, `GMAIL_PASS`, the notification database, and `RABBITMQ_URL` (defaults to `amqp://localhost`). Use the same broker URL in Booking Service. Apply Sequelize migrations and run `npm run dev`. Keep mail credentials in local configuration, not source control.
